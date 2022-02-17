@@ -1,0 +1,26 @@
+---
+logger-info:
+   logger-name: "soundrecorder"
+   filehandler-data:
+      include: true
+      level: "INFO"
+      log-Location: "/home/dale/pi1shared/logs"
+   gmailhandler-data:
+     include: false
+   dbhandler-data:
+      include: false
+soundrecorder-info:
+   run-minutes: ~
+   device-index: 6
+   format: 8
+   sample-rate: 48000
+   chunk: 1000
+   channels: 1
+   input: true
+   delete-old: true
+   output-name: 'nsrt'
+   dest-dir: '/mnt/share/DKF/SoundRecord'
+   network-share: '//192.168.0.209/shared'
+   local-mount: '/mnt/share'
+   credentials-file: '/home/dale/.smbcredentials'
+

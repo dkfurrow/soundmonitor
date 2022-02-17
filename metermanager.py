@@ -1,186 +1,268 @@
 #!/usr/bin/python -u
 # coding=utf-8
-# Manage Sound Meter
-import sys
+"""
+Manage Convergence nsrt-mk3-dev Sound Level Meter, aggregates readings by minute
+https://github.com/xanderhendriks/nsrt-mk3-dev
 
-import usb.core
-import usb.util
-import random
-import time
-import signal
-from LogManager import MessageHandler
-import numpy as np
-import pandas as pd
-from collections import deque
-import pandas as pd
-from pandas.tseries.offsets import Minute
+"""
+import argparse
+import importlib
+import logging
 import os
-import re
-import itertools
-from datetime import datetime
+import sys
+import time
+import traceback
+from collections import OrderedDict
+from collections import deque
+from pathlib import Path
 from pprint import pprint
-VENDOR_ID = 0x64bd
-PRODUCT_ID = 0x74e3
-timestamp_format = '%m/%d/%Y %H:%M:%S.%f'
 
+import pandas as pd
+import yaml
+from nsrt_mk3_dev import NsrtMk3Dev
+from pandas.tseries.offsets import Minute, Second, Milli
 
-class SoundMeterReading:
-    range_dict = {0: '30-130', 1: '30-80', 2: '50-100', 3: '60-110', 4: '80-130'}
-    ts: pd.Timestamp = None
-    int_buffer: list = None
-    binaries: list = None
-    decibal_reading: float = None
-    is_slow: bool = None  # as opposed to fast
-    is_max: bool = None  # as opposed to NotMax
-    is_a: bool = None  # as opposed to c
-    range: str = None  # element of fixed range setting
+from datamanager import DataManager
+from logmanager import MessageHandler
 
-    def __init__(self, ts: datetime, int_buffer: list):
-        self.ts = ts
-        if len(int_buffer) != 8:
-            raise ValueError("buffer must be of length 8")
-        self.int_buffer = int_buffer
-        self.parse_intbuffer()
-
-    def parse_intbuffer(self):
-        read_binaries = []
-        try:
-            for ele in self.int_buffer:
-                binary = '{0:08b}'.format(ele)
-                read_binaries.append(binary)
-        except:
-            raise ValueError("Could not interpret integer buffer elements from device")
-        self.binaries = read_binaries
-        self.decibal_reading = float((self.int_buffer[0] * 256. + self.int_buffer[1]) / 10.)
-        settings_str = self.binaries[2][0:4]
-        self.is_slow = True if settings_str[1] == '0' else False
-        self.is_max = True if settings_str[2] == '1' else False
-        self.is_a = True if settings_str[3] == '0' else False
-        range_str = self.binaries[2][4:8]
-        range_int = int(range_str, 2)
-        if self.range_dict.get(range_int):
-            self.range = self.range_dict[range_int]
-        else:
-            raise ValueError("Invalid Range in buffer output")
-        if None in [self.decibal_reading, self.is_slow, self.is_max, self.is_a, self.range]:
-            raise ValueError("Invalid reading parse, at least one element failed to parse")
-
-    def to_dict(self):
-        return {'timestamp': self.ts, 'decibel': self.decibal_reading, 'slow': self.is_slow,
-                'lockmax': self.is_max, 'a': self.is_a, 'range': self.range}
-
-    def get_timestamp(self):
-        return self.ts
-
-    def __str__(self):
-        # Fast is current time reading, Slow within 1 second
-        # max locks up the meximum reading , NotMax does not
-        # A=> normal frequcny C=>low frequency,
-        # SoundLevel is range measured
-        # default: Fast, NotMax, A, 30-130
-        return 'timestamp: {0}, decibel: {1:.1f}, TimeWeight: {2}, MaxValue: {3}, FrequencyWeight: {4},' \
-               ' soundLevel: {5}'.format(self.ts.strftime(timestamp_format), self.decibal_reading,
-                                         "Slow" if self.is_slow else "Fast","Max" if self.is_max else "NotMax",
-                                         "A" if self.is_a else "C" ,self.range)
+MODULE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+os.chdir(MODULE_DIRECTORY)
+TIMESTAMP_FORMAT = '%m/%d/%Y %H:%M:%S.%f'
+TIMESTAMP_FORMAT_SQL = '%Y-%m-%d %H:%M:%S'
+NSRT_WEIGHTINGS = dict([('DB_A', NsrtMk3Dev.Weighting.DB_A), ('DB_C', NsrtMk3Dev.Weighting.DB_C),
+                        ('DB_Z', NsrtMk3Dev.Weighting.DB_Z)])
+TIME_PADDING_SECONDS = 0.001  # time after mark to call meter for measurement (ensures meter queried 'after' mark
+MIN_RUN_TIME_SECONDS = 5.0  # must run for this minimum time before recording
 
 
 class MeterManager:
-    dev: usb.core.Device = None
-    eout: usb.core.Endpoint = None
-    ein: usb.core.Endpoint = None
-    state_request: bytearray = None
-    sound_readings: deque = None
-    interface = 0
+    """
+    Main meter manager class
+    """
+    nsrt: NsrtMk3Dev = None  # nsrt meter representation from NsrtMk3Dev
+    sound_readings: deque = None  # running fixed queue of sound readings
+    _measurement_frequency: float = None  # how often to query meter (e.g. 1 sec, 0.5 sec)
+    _meter_info: dict = None  # dictionary of meter configurations
+    _data_manager: DataManager = None  # data manager for output
+    _message_handler: MessageHandler = None  # hanlde logging
+    _device_port: str = None  # device port as specified
+    _weighting: NsrtMk3Dev.Weighting = None  # frequency weighting
+    _tau: float = None  # time period for 'L' reading (e.g. 1 sec for 'slow' 0.125 sec for 'fast'
+    _freq: int = None  # frequency setting
+    _meter_id: int = None  # meter identification defined in config file for meta data
 
+    def __init__(self):
+        pass
 
-    def __init__(self, message_handler: MessageHandler):
-        self.sound_readings = deque([], 1000)
-        self.connect_and_clear()
+    @classmethod
+    def metermanager_from_configfile(cls, config_filename: str, message_handler: MessageHandler):
+        meter_manager = MeterManager()
+        meter_manager.load_meter_data(config_filename)
+        meter_manager._message_handler = message_handler
+        try:  # attempting to instantiate DataManager from string
+            message_handler.log("Creating data manager: {0}".format(meter_manager.get_meter_info()['data-manager']))
+            datamanager_module = importlib.import_module("datamanager")
+            datamanager_class = getattr(datamanager_module, meter_manager.get_meter_info()['data-manager'])
+            meter_manager._data_manager = datamanager_class(meter_manager.get_meter_info(), message_handler)
+        except Exception as ex1:
+            message_handler.log("Error--datamanager improperly specified\n{0}"
+                                .format(traceback.format_exc()), lvl=logging.CRITICAL)
+            raise ex1
+        try:
+            # 3 minutes of readings
+            queue_length = int(1. / meter_manager.get_meter_info()['measurement-frequency'] * 60. * 3.)
+            meter_manager.sound_readings = deque([], queue_length)
+            meter_manager._measurement_frequency = meter_manager.get_meter_info()['measurement-frequency']
+            meter_manager._device_port = meter_manager.get_meter_info()['device-port']
+            meter_manager._weighting = NSRT_WEIGHTINGS[meter_manager.get_meter_info()['weighting']]
+            meter_manager._tau = meter_manager.get_meter_info()['tau']
+            meter_manager._freq = meter_manager.get_meter_info()['freq']
+            meter_manager._meter_id = meter_manager.get_meter_info()['meter-id']
+            meter_manager.nsrt = NsrtMk3Dev(meter_manager._device_port)
+            meter_manager.connect_and_set()
+        except Exception as ex1:
+            message_handler.log("Error--meter manager improperly specified, check run parameters\n{0}"
+                                .format(traceback.format_exc()), lvl=logging.CRITICAL)
+            raise ex1
+        return meter_manager
 
+    def get_run_mins(self):
+        return self._meter_info['run_mins']
 
-    def is_driver_active(self):
-        is_active: bool = self.dev.is_kernel_driver_active(0)
-        print("Kernal driver active: {0}".format(is_active))
+    def get_meter_info(self):
+        return self._meter_info
 
+    def get_measurement_frequency(self):
+        return self._measurement_frequency
 
-    def connect_and_clear(self):
-        self.dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
-        if self.dev == None:
-            print("no Sound Meter found!")
+    def connect_and_set(self):
+        """
+        connects to meter, sets various parameters
+        :return:
+        """
+        self.nsrt = NsrtMk3Dev(port=self._device_port)
+        if self.nsrt.serial is None:
+            self._message_handler.log("no Sound Meter found!")
             sys.exit()
-        if self.dev.is_kernel_driver_active(0):
-            self.dev.detach_kernel_driver(0)
-            usb.util.claim_interface(self.dev, 0)
-        self.is_driver_active()
-        self.eout = self.dev[0][(0, 0)][0]
-        self.ein = self.dev[0][(0, 0)][1]
-        self.state_request = bytearray([0xb3, random.randint(0, 255), random.randint(0, 255),
-                                        random.randint(0, 255), 0, 0, 0, 0])
-        _ = self.dev.read(self.ein.bEndpointAddress, self.ein.wMaxPacketSize)  # clear buffer,
-        print("usb device connected and cleared")
+        success = self.nsrt.write_tau(self._tau)
+        self._message_handler.log("adjusting meter tau to {0:.3f}--success {1}".format(self.nsrt.read_tau(), success))
+        success = self.nsrt.write_weighting(self._weighting)
+        self._message_handler.log("adjusting weighting to {0}--success {1}"
+                                  .format(self.nsrt.read_weighting().name, success))
+        success = self.nsrt.write_fs(self._freq)
+        self._message_handler.log("adjusting frequency level of sound meter to {0:d}--success {1}"
+                                  .format(self.nsrt.read_fs(), success))
+        self._message_handler.log("usb device connected, measurement frequency (seconds): {0:.2f}"
+                                  .format(self._measurement_frequency))
 
     def generate_spl(self):
-        spl_generate_time: pd.Timestamp = pd.Timestamp.now()
-        timeout: time = time.time() + 5
-        print("Requesting meter read at {0}".format(spl_generate_time.strftime(timestamp_format)))
-        self.dev.write(self.eout.bEndpointAddress, self.state_request)
-        buffer = []
-        need_restart: bool = False
-        while True:
-            buffer += self.dev.read(self.ein.bEndpointAddress, self.ein.wMaxPacketSize)
-            if len(buffer) >= 8:
-                break
-            if time.time() > timeout:
-                print("error! buffer taking too long")
-                need_restart = True
-                break
-        if not need_restart:
-            sound_meter_reading: SoundMeterReading = SoundMeterReading(ts=spl_generate_time,
-                                                                   int_buffer=buffer)
-            print(sound_meter_reading)
-            self.sound_readings.append(sound_meter_reading)   # right side of queue
-        else:
-            print("Resetting USB device")
-            self.dev.reset()
-            self.connect_and_clear()
+        """
+        query meter, load readings into dictionary, add to queue
+        :return: None
+        """
+        sound_meter_reading = [('timestamp', pd.Timestamp.now()),
+                               ('lavg', self.nsrt.read_level()),
+                               ('leq', self.nsrt.read_leq()),
+                               ('temp_f', self.nsrt.read_temperature() * 9. / 5. + 32.),
+                               ('nsrt_id', self._meter_id),
+                               ('tau', "{0:.2f}".format(self.nsrt.read_tau())),
+                               ('wt', self.nsrt.read_weighting().name),
+                               ('freq', "{0:d}".format(self.nsrt.read_fs())),
+                               ('serial_number', self.nsrt.read_sn()),
+                               ('firmware_revision', self.nsrt.read_fw_rev()),
+                               ('date_of_birth', self.nsrt.read_dob()),
+                               ('date_of_calibration', self.nsrt.read_doc())]
+        # self.print_reading(sound_meter_reading)
+        self.sound_readings.append(OrderedDict(sound_meter_reading))  # right side of queue
 
-    def summarize_readings(self):
+    def load_meter_data(self, this_config_filename):
+        """
+        load meter configuration specs from configfile
+        :param this_config_filename: yaml file to query
+        :return: None
+        """
+        if Path(MODULE_DIRECTORY).exists() and Path(MODULE_DIRECTORY, this_config_filename).exists():
+            try:
+                with open(Path(MODULE_DIRECTORY, this_config_filename), 'r') as f:
+                    self._meter_info = yaml.safe_load(f)['soundmeter-info']
+            except Exception as ex1:
+                raise ValueError('Could not parse config, exception {0}'.format(str(ex1)))
+        else:
+            raise ValueError("Path to config file {0} does not exist"
+                             .format(Path(MODULE_DIRECTORY, this_config_filename)))
+
+    def write_readings_block(self):
+        """
+        write one minute of data per DataManager specification
+        :return:
+        """
         end_reading: pd.Timestamp = pd.Timestamp.now().floor('min')
         start_reading = end_reading - Minute(1)
-        df: pd.DataFrame = pd.DataFrame.from_records([x.to_dict() for x in list(self.sound_readings)])
+        df: pd.DataFrame = pd.DataFrame.from_records(list(self.sound_readings))
         df = df[df['timestamp'].between(start_reading, end_reading)]
-        df.to_parquet('testdata.parquet', index=False)
-        segment_stats_dict = df.describe(percentiles=[0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95])\
-        .to_dict()['decibel']
-        summary_dict = {}
-        summary_dict['timestamp'] = df.timestamp.max().ceil('min')
-        for k, v in segment_stats_dict.items():
-            summary_dict["db_{0}".format(k)] = v
-        pprint(summary_dict)
+        df.set_index('timestamp', inplace=True)
+        self._message_handler.log("writing minute ending {0} to database..."
+                                  .format(df.index.to_list()[-1].ceil(freq='T')))
+        self._data_manager.save_reading(data=df)
 
-
+    # noinspection PyTypeChecker
     def close(self):
-        usb.util.release_interface(self.dev, self.interface)
-        # reattach the device to the OS kernel
-        self.dev.attach_kernel_driver(self.interface)
+        """
+        close serial port
+        :return: None
+        """
+        print("closing serial port...")
+        self.nsrt.serial.close()
+        print("Serial connection is closed: {0}".format(not self.nsrt.serial.is_open))
+        self.nsrt = None
 
 
+def run_meter(config_filename: str):
+    """
+    run meter in accordance with config gile
+    :param config_filename: config file
+    :return: None
+    """
+    run_message_handler = MessageHandler(config_filename=config_filename, is_debug=False)
+    run_message_handler.log("start time meter manager now {0}".format(pd.Timestamp.now().strftime(TIMESTAMP_FORMAT)))
+    meter_manager: MeterManager = MeterManager.metermanager_from_configfile(config_filename, run_message_handler)
+    measurement_freq_ms = int(meter_manager.get_measurement_frequency() * 1000.)
+    # establish time to start querying meter, time to end if any
+    if (pd.Timestamp.now().ceil('min') - pd.Timestamp.now()).total_seconds() > MIN_RUN_TIME_SECONDS:
+        start_time = pd.Timestamp.now().ceil('min')
+    else:  # add one minute
+        start_time = pd.Timestamp.now().ceil('min') + Minute(1)
+    mins_to_run = meter_manager.get_run_mins()
+    end_time = start_time + Minute(mins_to_run) + Second(1) if mins_to_run else None
+    if end_time:
+        run_message_handler.log('stopping at {0}'.format(end_time))
+    else:
+        run_message_handler.log("running for indefinite period")
+    if mins_to_run is not None:
+        run_message_handler.log("start data saving: {0}, end {1}"
+                                .format(start_time.strftime(TIMESTAMP_FORMAT), end_time.strftime(TIMESTAMP_FORMAT)))
+    else:
+        run_message_handler.log("start data saving: {0}".format(start_time.strftime(TIMESTAMP_FORMAT)))
+    next_summary_time = start_time + Minute(1)
+    sleep_until = ((pd.Timestamp.now().ceil('s') + Second(1)) - pd.Timestamp.now()).total_seconds() + \
+                  TIME_PADDING_SECONDS
+    run_message_handler.log("start pinging soundmeter: {0}"
+                            .format((pd.Timestamp.now() + Milli(int(sleep_until * 1000.)))
+                                    .strftime("%Y-%m-%d %H:%M:%S.%f")))
+    time.sleep(sleep_until)
+    while True:   # now, run meter for specified period
+        try:
+            meter_manager.generate_spl()
+            time.sleep((pd.Timestamp.now().floor('{0:d}ms'.format(measurement_freq_ms)) + Milli(measurement_freq_ms)
+                        - pd.Timestamp.now()).total_seconds() + TIME_PADDING_SECONDS)
+            updated_time = pd.Timestamp.now()
+            if end_time is not None and updated_time > end_time:
+                run_message_handler.log("Maximum time exceeded, closing...")
+                meter_manager.close()
+                break
+            if updated_time > next_summary_time:  # time to write minute of reading data
+                meter_manager.write_readings_block()
+                next_summary_time += Minute(1)
+        except Exception as ex1:
+            run_message_handler.log("Error during running of meter manager\n{0}"
+                                    .format(traceback.format_exc()), lvl=logging.CRITICAL)
+            raise ex1
+    run_message_handler.log("program ended")
 
 
+def print_serial_info():
+    """
+    prints serial info to find meter as configured by host machine
+    :return: None
+    """
+    print("checking serial ports...")
+    if os.name == 'nt':  # sys.platform == 'win32':
+        from serial.tools.list_ports_windows import comports
+    elif os.name == 'posix':
+        from serial.tools.list_ports_posix import comports
+    # ~ elif os.name == 'java':
+    else:
+        raise ImportError("Sorry: no implementation for your platform ('{}') available".format(os.name))
+    infos = comports()
+    for info in infos:
+        pprint(info.__dict__)
+        hwid = dict(zip(['vendorId', 'productId'], info.usb_info().split()[1].split('=')[1].split(':')))
+        print(hwid)
+    print("exiting...")
 
 
 if __name__ == "__main__":
-    start_time = pd.Timestamp.now()
-    end_time = start_time + Minute(2)
-    print("start {0} end {1}".format(start_time.strftime(timestamp_format),
-                                     end_time.strftime(timestamp_format)))
-    meter_manager = MeterManager(message_handler=None)
-    updated_time = pd.Timestamp.now()
-    while updated_time < end_time:
-        meter_manager.generate_spl()
-        time.sleep(2.0)
-        updated_time = pd.Timestamp.now()
-    print("End time exceeded")
-    meter_manager.summarize_readings()
-    meter_manager.close()
-    print("program ended")
+    my_parser = argparse.ArgumentParser(prog='soundmonitor', description='Run NSRT sound meter, save results')
+    my_parser.add_argument('--config_file', type=str, help='config file to run')
+    my_parser.add_argument('--check_serial', action='store_true')  # no argument needed
+    args = my_parser.parse_args()
+    if args.check_serial:
+        print_serial_info()
+        sys.exit(0)
+    try:
+        # data_manager: DataManager = CSVDataManager(csv_location='./logs', csv_name='test.csv')
+        if args.config_file:
+            run_meter(args.config_file)
+    except Exception as ex:
+        print(ex)
+        print(traceback.format_exc())

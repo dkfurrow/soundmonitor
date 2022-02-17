@@ -1,0 +1,34 @@
+---
+logger-info:
+   logger-name: "soundmonitor"
+   filehandler-data:
+      include: true
+      level: "INFO"
+      log-Location: "/home/user1/scripts/logs"
+   gmailhandler-data:
+     include: false
+   dbhandler-data:
+      include: true
+      level: 'INFO'
+      db-configfile: 'SampleDbaseConfig.yaml'
+      db-target-alias: 'localhost-admin-process_logs'
+soundmeter-info:
+#  tau: 1.0 => 'slow' 0.125 => 'fast' 0.035 => 'impulse'
+  device-port: '/dev/ttyACM0'
+  meter-id: 0
+  measurement-frequency: 1.0
+  run_mins: ~
+  weighting: 'DB_A'
+  freq: 48000
+  tau: 1.0
+  data-manager: 'DBDataManager'
+  db-target-alias: 'localhost-weather-nsrt'
+  db-configfile: 'ConfigDatabases.yaml'
+  meta-entry:
+    station_name: 'test'
+    station_location: 'location1'
+    station_height_m: 5
+    modified_by: 'user2'
+    modified_time: 'now'
+  csv-location: './logs'
+  csv-filename: 'nsrt.csv'

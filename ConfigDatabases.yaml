@@ -1,0 +1,23 @@
+---
+connection-data:
+  pi1-weather-nsrt:
+    hostname: '192.168.0.214'
+    port: '3306'
+    db: 'weather'
+    user: 'dale'
+    passwd: 'pi1shared'
+    table-name: 'nsrt_data'
+  localhost-weather-nsrt:
+    hostname: 'localhost'
+    port: '3306'
+    db: 'weather'
+    user: 'dale'
+    passwd: 'dale'
+  localhost-admin-process_logs:
+    hostname: 'localhost'
+    port: '3306'
+    db: 'admin'
+    user: 'dale'
+    passwd: 'dale'
+    table-name: 'process_logs'
+

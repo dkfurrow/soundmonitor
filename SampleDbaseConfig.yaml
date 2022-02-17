@@ -1,0 +1,23 @@
+---
+connection-data:
+  pi1-environ-nsrt:
+    hostname: '192.168.1.221'
+    port: '3306'
+    db: 'environ'
+    user: 'user1'
+    passwd: 'password1'
+    table-name: 'nsrt_data'
+  localhost-environ-nsrt:
+    hostname: 'localhost'
+    port: '3306'
+    db: 'environ'
+    user: 'user2'
+    passwd: 'password2'
+  localhost-admin-process_logs:
+    hostname: 'localhost'
+    port: '3306'
+    db: 'admin'
+    user: 'user3'
+    passwd: 'password3'
+    table-name: 'process_logs'
+
