@@ -1,6 +1,6 @@
 <h1 style="text-align:center">SoundMonitor: An Application for the <br /> <a href="https://convergenceinstruments.com/product/sound-level-meter-data-logger-with-type-1-microphone-nsrt_mk3-dev/" target="_blank">NSRT_mk3_Dev</a> Sound Level Meter</h1>
 
-##Introduction:
+## Introduction:
 The [NSRT_mk3_Dev](https://convergenceinstruments.com/product/sound-level-meter-data-logger-with-type-1-microphone-nsrt_mk3-dev/) Sound Level Meter Data Logger from [Convergence Instuments](https://convergenceinstruments.com/) is a variant of their [NSRT_mk3](https://convergenceinstruments.com/product/sound-level-meter-data-logger-with-type-1-microphone-nsrt_mk3/) series of of sound level data loggers, specifically designed to allow for control of the device from any computer that supports the CDC (Communication) USB class--i.e. Windows, Linux, and Mac. Convergence has conveniently published the [com protocol](https://convergenceinstruments.com/pdf/NSRT_mk3_Com_Protocol.pdf) for this device.  This com protocol is implemented in a [python package](https://github.com/xanderhendriks/nsrt-mk3-dev) available in [pypi](https://pypi.org/project/nsrt-mk3-dev/), authored by [Xander Hendriks](https://github.com/xanderhendriks).
 
 The [NSRT_mk3](https://convergenceinstruments.com/product/sound-level-meter-data-logger-with-type-1-microphone-nsrt_mk3/) series is a sound meter of type I precision capable of measuring decibel levels as real-time exponentially-averaged levels “L”, and integrated L<sub>EQ</sub>s, at a user-specified response time [(i.e. 'fast' or 'slow')](https://www.acoustic-glossary.co.uk/time-weighting.htm). This meter can implement standard frequency weighting curves (A, C, or Z), is factory calibrated (with Manufacturer’s Certificate of Calibration provided), and is capable of being calibrated against any [standard 94dB source](https://convergenceinstruments.com/product/sound-calibrator-ca114/) which will accommodate a 1/2" microphone.
@@ -9,7 +9,7 @@ The [NSRT_mk3_Dev](https://convergenceinstruments.com/product/sound-level-meter-
 
 This project utilizes the nsrt-mk3-dev package, along with [PyAdio](https://pypi.org/project/PyAudio/) and a number of other commonly utilized packages to implement a complete framework for managing the NSRT_mk3_Dev as *both* a sound level meter and microphone, continuously storing a series of sound level measurements and sound files in a configuration specified by the user. The use case for this application is to create a continuous data set of sound pressure readings and sound recordings which can then be subjected to further analysis e.g. for compliance against an industrial standard, compliance with legal noise ordinances, identification of anomalous sound patterns, or other analysis.
 
-##Structure: 
+## Structure: 
 
 The project has 3 main modules which run from the command line:
 
@@ -24,7 +24,7 @@ The project has 4 supporting modules:
 3.  `datamanager.py` handles saving of sound meter data from `metermanager.py`.  Two `DataManager` implementations are included, to save sound data to database and to csv file.  With respect to database connections, *the implementations code assumes availability of the specified host*.  If other data connections are needed (e.g. AWS, MQTT Broker), other `DataManager` implementation could be written.
 4.  `datatablecreate.py` handles the creation of mysql database tables expected by `DBDataManager` (the `DataManager` subclass which writes SoundMonitor data to mysql tables. 
 
-###Configuration Files:
+### Configuration Files:
 
 There are 3 configuration files, one for database connections, one for `metermanager.py`, one for `mikemanager.py`. They are all configured to be [yaml](https://yaml.org/) files:
 
@@ -117,7 +117,7 @@ soundrecorder-info:<br />
 &emsp;local-mount: '/mnt/share'<span style="color:grey"> # if network share is used, where it is mounted</span><br />
 &emsp;credentials-file: '/home/user2/.smbcredentials'<span style="color:grey"> # if network share is used, where are credentials</span><br />
 
-##Implementation
+## Implementation
 
 This project has been tested in linux only, and assumes a python installation of version 3.8.8 or higher.  To implement:
 
@@ -171,7 +171,7 @@ exiting...
 
 So the `device-port` entry in the appropriate config file is `/dev/ttyACM0`, for this particular device.
 
-###soundrecorder.py
+### soundrecorder.py
 
 running the `help` option in the same manner as above yields:
 
@@ -214,7 +214,7 @@ index: 19, name:default
 
 and we see that the microphone associated with the NSRT_mk3_Dev is at index '6'.  Therefore, the appropriate `device-index` entry in the config file for soundrecorder is 6. 
 
-##Expected Result
+## Expected Result
 For `SoundMonitor`, we observe a continuous stream of sound data written either to a csv file or a set of database tables, in accordance with the configuration file entries.  The module writes in batches, one batch every calendar minute, with the number of entries in each minute determined by the `measurement-frequency` entry (effectively, the length of time in seconds between queries of the sound meter for data).  As noted in the [NSRT_mk3_Dev](https://convergenceinstruments.com/product/sound-level-meter-data-logger-with-type-1-microphone-nsrt_mk3-dev/) user manual, the `measurement-frequency` entry also sets the time period associated with the 'L<sub>EQ</sub>' value received from the meter.  In contrast, the period of time associated with the 'L' value is explicitly set in the config file by the `tau` entry.<br /><br />**database structure:**  if the DBDataManager is utilized, data are stored in 3 tables: `nsrt_data` holds the time series of sound and temperature data, with reference to selected meter parameters in `nsrt_params` and meta data in `nsrt_meta`. **Example output:**<br/>
 <pre>
 <b><u>nsrt_data</u></b>
@@ -249,7 +249,7 @@ modified_time     2022-02-14 20:43:04
 
 For `SoundRecorder`, we observe a sequence of 'wav' files written to the location specified in the config file. The file format is YYYYmmddHHMMSS**name**, where **name** is specified in the `output-name` entry in the config file.  For example, where **name** is 'nsrt', then the minute *ending* 11:48:00 PM on Jan 15, 2021 will be named *202101152348nsrt.wav*.
 
-##Final Notes
+## Final Notes
 
 I generally run these modules as a service from a development board, such as a raspberry pi, routing the soundmonitor output to an internal mysql database, and the generated 'wav' soundfiles to available network storage.  [Here](https://websofttechs.com/tutorials/how-to-setup-python-script-autorun-in-ubuntu-18-04/) is a good basic description of how to setup a service from a python script--a basic search will yield many others.  Your use case may differ--in which case, the code released here might form a useful base for your own sound monitoring project.
 
